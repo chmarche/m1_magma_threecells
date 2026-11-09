@@ -5,7 +5,7 @@ from .cqmom_2d_adaptive import cqmom_2d_adaptive
 from .normalization import normalized, renormalize
 
 
-def momsources(t, y_state, funH, cqmom, magma, Models, initial):
+def momsources(t, y_state, funH, cqmom, magma, Models, initial, pl=None, T=None):
     """Termini sorgente dei momenti e delle specie 
     I momenti vengono prima invertiti con il CQMOM, poi si calcola l'effetto della
     crescita di volume e di massa delle bolle.
@@ -20,8 +20,10 @@ def momsources(t, y_state, funH, cqmom, magma, Models, initial):
     PM = np.atleast_1d(magma.species.PM)
 
     # Pressione e temperatura
-    pl = funH.thermoPT.p(t, Models.pressure)
-    T = funH.thermoPT.T(t, Models.temperature)
+    if pl is None:
+        pl = funH.thermoPT.p(t, Models.pressure)
+    if T is None:
+        T = funH.thermoPT.T(t, Models.temperature)
 
     # Rinormalizzazione
     y = renormalize(y_state, f, Ns, initial.norm)
