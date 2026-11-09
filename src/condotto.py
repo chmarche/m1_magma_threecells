@@ -1,3 +1,6 @@
+# NB rimodificare z_0 con z_top perchè fa riferimento alla superficie del condotto, mentre 
+# z0 fa riferimento alla base
+
 """ 
     Modello con 3 celle caratteristiche nel condotto. metodo delle linee
     Convenzione: asse z verso l'alto, z_0 superficie libera e la prima cella (0) è la più profonda
