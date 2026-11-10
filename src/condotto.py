@@ -19,9 +19,9 @@ from .momsources import momsources
 from .normalization import normalized, renormalize
 
 
-def pressure_z(z, z_0, p_0, rho_l):
+def pressure_z(z, z_top, p_top, rho_l):
     """Pressione idrostatica del liquido alla quota z: aumenta andando in profondita'."""
-    return p_0 + rho_l * Constants.g * (z_0 - z)
+    return p_top + rho_l * Constants.g * (z_top - z)
 
 
 def build_funH(Models, initial):
@@ -51,13 +51,13 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
 
     # Geometria
     N = grid.N
-    z_0 = grid.z0 + N * grid.dz
+    z_top = grid.z0 + N * grid.dz
     z = grid.z0 + (np.arange(N) + 0.5) * grid.dz       # centri cella, 0 = piu' profonda
     z_in = grid.z0 - 0.5 * grid.dz                     # cella fantasma di ingresso
 
     # DIPENDENZA DALLA QUOTA: pressione del liquido in ogni cella (costante nel tempo)
-    pl = pressure_z(z, z_0, grid.p_0, rho_l)
-    p_in = pressure_z(z_in, z_0, grid.p_0, rho_l)
+    pl = pressure_z(z, z_top, grid.p_top, rho_l)
+    p_in = pressure_z(z_in, z_0, grid.p_top, rho_l)
 
     # Stato di ingresso: bolle in equilibrio meccanico con il liquido alla pressione di ingresso
     Models.pressure.p0 = p_in
