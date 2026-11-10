@@ -57,7 +57,7 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
 
     # DIPENDENZA DALLA QUOTA: pressione del liquido in ogni cella (costante nel tempo)
     pl = pressure_z(z, z_top, grid.p_top, rho_l)
-    p_in = pressure_z(z_in, z_0, grid.p_top, rho_l)
+    p_in = pressure_z(z_in, z_top, grid.p_top, rho_l)
 
     # Stato di ingresso: bolle in equilibrio meccanico con il liquido alla pressione di ingresso
     Models.pressure.p0 = p_in
