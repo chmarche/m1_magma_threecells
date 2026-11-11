@@ -1,10 +1,20 @@
-# NB rimodificare z_0 con z_top perchè fa riferimento alla superficie del condotto, mentre 
-# z0 fa riferimento alla base
+"""
+Modello a N celle (default 3) lungo il condotto: metodo delle linee.
 
-""" 
-    Modello con 3 celle caratteristiche nel condotto. metodo delle linee
-    Convenzione: asse z verso l'alto, z_0 superficie libera e la prima cella (0) è la più profonda
-    e riceve in ingresso lo stato fisso Yin
+Per ogni cella lo stato e' quello del codice 0-D (momenti M00, M10, M01 + massa disciolta c),
+gli stessi termini sorgente di momsources, piu' un termine di avvezione upwind del primo ordine:
+
+    dY_i/dt = -u_i (Y_i - Y_{i-1}) / dz + S(Y_i, p_l(z_i))
+
+Convenzione: z cresce verso l'alto, z_top e' la superficie libera, la cella 0 e' la piu' profonda
+e riceve in ingresso lo stato fisso Yin (cella 'fantasma' a monte).
+
+Modello di velocita' (grid.velocityModel):
+  'constant'   u = grid.u in tutto il condotto
+  'continuity' u(z) dalla conservazione del volume: la velocita' alla base e' grid.u e cresce
+               salendo per l'espansione delle bolle:  u_{i+1/2} = u_{i-1/2} + dz * div_u,i
+               (div_u,i = divergenza della velocita' nella cella i, da momsources)
+u_i qui e' la velocita' alla faccia inferiore della cella i (la faccia a monte per l'upwind).
 """
 from types import SimpleNamespace
 
@@ -44,7 +54,12 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
         raise NotImplementedError('Implementata una sola specie volatile (H2O).')
     if (cqmom.N1, cqmom.N2) != (1, 1):
         raise NotImplementedError('Implementato solo il caso monodisperso (N1 = N2 = 1).')
-
+    
+    vel_model = getattr(grid, 'velocityModel', 'constant')
+    if vel_model not in ('constant', 'continuity'):
+        raise ValueError(f"velocityModel '{vel_model}' non riconosciuto: 'constant' o 'continuity'")
+    var_u = (vel_model == 'continuity')
+    
     funH = build_funH(Models, initial)
     rho_l = magma.liquid.rho_l
     PM = np.atleast_1d(magma.species.PM)
@@ -54,7 +69,8 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
     z_top = grid.z0 + N * grid.dz
     z = grid.z0 + (np.arange(N) + 0.5) * grid.dz       # centri cella, 0 = piu' profonda
     z_in = grid.z0 - 0.5 * grid.dz                     # cella fantasma di ingresso
-
+    z_face = grid.z0 + np.arange(N + 1) * grid.dz      # facce delle celle (N+1)
+    
     # DIPENDENZA DALLA QUOTA: pressione del liquido in ogni cella (costante nel tempo)
     pl = pressure_z(z, z_top, grid.p_top, rho_l)
     p_in = pressure_z(z_in, z_top, grid.p_top, rho_l)
@@ -86,17 +102,32 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
     nvar = Yin.size
     y_init = np.tile(Yin, N)                           # tutte le celle partono dallo stato di ingresso
 
+    def sources_and_velocity(t, Y):
+        """Sorgenti (N, nvar) e velocita' alle N+1 facce. Si procede dal basso verso l'alto:
+        la velocita' della faccia superiore della cella i dipende solo dalle celle sotto."""
+        S = np.empty_like(Y)
+        u_face = np.empty(N + 1)
+        u_face[0] = grid.u                             # velocita' alla base (dato in ingresso)
+        for i in range(N):
+            if var_u:
+                S[i], div_u = momsources(t, Y[i], funH, cqmom, magma, Models, initial,
+                                         pl=pl[i], return_div=True)
+                u_face[i + 1] = u_face[i] + grid.dz * div_u
+            else:
+                S[i] = momsources(t, Y[i], funH, cqmom, magma, Models, initial, pl=pl[i])
+                u_face[i + 1] = grid.u
+        return S, u_face
+
     def rhs(t, yflat):
         Y = yflat.reshape(N, nvar)
         Yup = np.vstack([Yin, Y[:-1]])                 # upwind: cella a monte (sotto)
-        adv = -grid.u * (Y - Yup) / grid.dz
-        S = np.empty_like(Y)
-        for i in range(N):
-            S[i] = momsources(t, Y[i], funH, cqmom, magma, Models, initial, pl=pl[i])
+        S, u_face = sources_and_velocity(t, Y)
+        adv = -u_face[:-1, None] * (Y - Yup) / grid.dz
         return (adv + S).ravel()
 
     dt = grid.CFL * grid.dz / grid.u
-    print(f'\n--- Conduit: N={N}, dz={grid.dz} m, u={grid.u} m/s, CFL={grid.CFL} -> dt={dt} s ---')
+    print(f'\n--- Conduit ({vel_model}): N={N}, dz={grid.dz} m, u_base={grid.u} m/s, '
+          f'CFL={grid.CFL} -> dt={dt} s ---')
     print(f'p_l celle [Pa] = {pl},  p_in = {p_in:.1f} Pa')
 
     sol = solve_ivp(rhs, (0.0, time.tout), y_init, method='BDF', max_step=dt,
@@ -109,9 +140,11 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
     t = sol.t
     Yn = sol.y.reshape(N, nvar, t.size)
     Yfis = np.empty_like(Yn)
-    for i in range(N):
-        for k in range(t.size):
+    u_faces = np.empty((N + 1, t.size))
+    for k in range(t.size):
+        for i in range(N):
             Yfis[i, :, k] = renormalize(Yn[i, :, k], f, Ns, norm)
+        u_faces[:, k] = sources_and_velocity(t[k], Yn[:, :, k])[1]
 
     M00, M10, M01 = Yfis[:, 0, :], Yfis[:, i_M10, :], Yfis[:, i_M01, :]
     Rs = Constants.R / PM[0]
@@ -119,13 +152,20 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
     p_g = M01 / M10 * Rs * T
     R_mean = (3 / 4 / np.pi * M10 / M00) ** (1 / 3)
 
-    res = SimpleNamespace(t=t, z=z, pl=pl, Y=Yfis, M00=M00, M10=M10, M01=M01,
-                          p_g=p_g, R_mean=R_mean, sol=sol)
+    res = SimpleNamespace(t=t, z=z, z_face=z_face, pl=pl, Y=Yfis, M00=M00, M10=M10, M01=M01,
+                          p_g=p_g, R_mean=R_mean, u_face=u_faces, sol=sol)
+
+    if var_u:
+        # Controllo di conservazione: a regime u*(1-alpha) (flusso volumetrico di liquido) costante
+        u_c = 0.5 * (u_faces[:-1, -1] + u_faces[1:, -1])
+        print('u alle facce a fine run [m/s]:', np.round(u_faces[:, -1], 5))
+        print('u*(1-M10) per cella a fine run:', np.round(u_c * (1 - M10[:, -1]), 5))
 
     figs = _make_figures(res)
     if save_out_figure:
+        tag = 'Conduit' if not var_u else 'ConduitU'
         for i, fig in enumerate(figs, start=1):
-            fig.savefig(f'Conduit_Fig{i}.jpg', dpi=300)
+            fig.savefig(f'{tag}_Fig{i}.jpg', dpi=300)
     if show:
         plt.show()
     return res
@@ -155,7 +195,7 @@ def _make_figures(res):
     axs[0].legend(loc='best')
     fig2.tight_layout()
 
-    fig3, axs = plt.subplots(1, 3, figsize=(14, 4.5))
+    fig3, axs = plt.subplots(1, 4, figsize=(18, 4.5))
     axs[0].plot(res.z, res.pl * 1e-6, 'o--', label='Liquid')
     axs[0].plot(res.z, res.p_g[:, -1] * 1e-6, 'o-', label='Gas')
     axs[0].set_ylabel('Pressure [MPa]')
@@ -164,6 +204,8 @@ def _make_figures(res):
     axs[1].set_ylabel('Gas volume fraction (M$_{10}$)')
     axs[2].plot(res.z, res.R_mean[:, -1], 'o-')
     axs[2].set_ylabel('Average radius [m]')
+    axs[3].plot(res.z_face, res.u_face[:, -1], 'o-')
+    axs[3].set_ylabel('Velocity at cell faces [m/s]')
     for a in axs:
         a.set_xlabel('z [m]')
     fig3.suptitle('Profili a fine simulazione')
