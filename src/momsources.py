@@ -1,11 +1,10 @@
-import numpy as np
+def momsources(t, y_state, funH, cqmom, magma, Models, initial, pl=None, T=None, return_div=False):import numpy as np
 
 from .constants import Constants
 from .cqmom_2d_adaptive import cqmom_2d_adaptive
 from .normalization import normalized, renormalize
 
-
-def momsources(t, y_state, funH, cqmom, magma, Models, initial, pl=None, T=None):
+def momsources(t, y_state, funH, cqmom, magma, Models, initial, pl=None, T=None, return_div=False):
     """Termini sorgente dei momenti e delle specie 
     I momenti vengono prima invertiti con il CQMOM, poi si calcola l'effetto della
     crescita di volume e di massa delle bolle.
@@ -109,4 +108,8 @@ def momsources(t, y_state, funH, cqmom, magma, Models, initial, pl=None, T=None)
     for p in range(Ns - 1):
         dcgdt[p] = s_mass_species[p, i_M01] + ygs[p] * s_nucl[i_M01] + yg[p] * s_U[i_M01]
 
-    return normalized(np.concatenate([s, dcdt, dcgdt]), f, Ns, initial.norm)
+
+    out = normalized(np.concatenate([s, dcdt, dcgdt]), f, Ns, initial.norm)
+    if return_div:
+        return out, -divU      # divergenza della velocita' = -divU del codice
+    return out
