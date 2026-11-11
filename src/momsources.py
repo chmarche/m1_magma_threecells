@@ -1,4 +1,4 @@
-def momsources(t, y_state, funH, cqmom, magma, Models, initial, pl=None, T=None, return_div=False):import numpy as np
+import numpy as np
 
 from .constants import Constants
 from .cqmom_2d_adaptive import cqmom_2d_adaptive
