@@ -1,5 +1,4 @@
-"""
-Modello a N celle (default 3) lungo il condotto: metodo delle linee.
+"""Modello a N celle (default 3) lungo il condotto: metodo delle linee.
 
 Per ogni cella lo stato e' quello del codice 0-D (momenti M00, M10, M01 + massa disciolta c),
 gli stessi termini sorgente di momsources, piu' un termine di avvezione upwind del primo ordine:
@@ -54,12 +53,12 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
         raise NotImplementedError('Implementata una sola specie volatile (H2O).')
     if (cqmom.N1, cqmom.N2) != (1, 1):
         raise NotImplementedError('Implementato solo il caso monodisperso (N1 = N2 = 1).')
-    
+
     vel_model = getattr(grid, 'velocityModel', 'constant')
     if vel_model not in ('constant', 'continuity'):
         raise ValueError(f"velocityModel '{vel_model}' non riconosciuto: 'constant' o 'continuity'")
     var_u = (vel_model == 'continuity')
-    
+
     funH = build_funH(Models, initial)
     rho_l = magma.liquid.rho_l
     PM = np.atleast_1d(magma.species.PM)
@@ -70,7 +69,7 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
     z = grid.z0 + (np.arange(N) + 0.5) * grid.dz       # centri cella, 0 = piu' profonda
     z_in = grid.z0 - 0.5 * grid.dz                     # cella fantasma di ingresso
     z_face = grid.z0 + np.arange(N + 1) * grid.dz      # facce delle celle (N+1)
-    
+
     # DIPENDENZA DALLA QUOTA: pressione del liquido in ogni cella (costante nel tempo)
     pl = pressure_z(z, z_top, grid.p_top, rho_l)
     p_in = pressure_z(z_in, z_top, grid.p_top, rho_l)
@@ -161,7 +160,11 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
         print('u alle facce a fine run [m/s]:', np.round(u_faces[:, -1], 5))
         print('u*(1-M10) per cella a fine run:', np.round(u_c * (1 - M10[:, -1]), 5))
 
+    res.diag = _diagnostics(res, grid, magma, rho_l, p_in, var_u)
+    _print_diagnostics(res, grid)
+
     figs = _make_figures(res)
+    figs.append(_make_diagnostic_figure(res))
     if save_out_figure:
         tag = 'Conduit' if not var_u else 'ConduitU'
         for i, fig in enumerate(figs, start=1):
@@ -212,3 +215,90 @@ def _make_figures(res):
     fig3.tight_layout()
 
     return [fig1, fig2, fig3]
+
+
+def _diagnostics(res, grid, magma, rho_l, p_in, var_u):
+    """Grandezze per capire in che regime lavora il sistema (tutte a fine simulazione, tranne il ritardo)."""
+    N = res.z.size
+    mu = magma.liquid.mu
+    t = res.t
+    u_c = 0.5 * (res.u_face[:-1, :] + res.u_face[1:, :])        # velocita' al centro cella (N, nt)
+    u_end = u_c[:, -1]
+    phi_in = res.M10[0, 0]                                      # stato di ingresso = stato iniziale
+
+    # 1) Ritardo del gas rispetto al liquido: > 0 vuol dire gas ancora sovrappressurizzato
+    lag = res.p_g - res.pl[:, None]                             # [Pa], (N, nt)
+
+    # 2) Riferimento di Boyle: bolle in equilibrio meccanico, gas ideale, massa di gas per bolla
+    #    costante, tensione superficiale trascurata  ->  volume della bolla ~ 1/p.
+    #    Il numero di bolle per volume di liquido non cambia, quindi g = phi/(1-phi) scala come v.
+    g_in = phi_in / (1 - phi_in)
+    g_eq = g_in * p_in / res.pl
+    phi_boyle = g_eq / (1 + g_eq)
+
+    # 3) Tempi caratteristici per cella
+    tau_relax = 4 * mu / (3 * res.p_g[:, -1])                   # rilassamento viscoso (inverso di |autovalore|)
+    tau_decomp = res.pl / (rho_l * Constants.g * u_end)         # tempo su cui la pressione cambia di un fattore ~e
+    t_cell = grid.dz / u_end                                    # tempo di attraversamento della cella
+    De = tau_relax / tau_decomp                                 # <<1: equilibrio (Boyle); >~1: dinamica di crescita
+
+    # 4) Flusso volumetrico di liquido u(1-phi), normalizzato all'ingresso: deve valere 1 a regime
+    flux = u_c * (1 - res.M10) / (res.u_face[0, :] * (1 - phi_in))
+
+    # 5) Si e' raggiunto il regime stazionario? variazione relativa di M10 nella cella piu' alta
+    k90 = np.searchsorted(t, 0.9 * t[-1])
+    rel_change = abs(res.M10[-1, -1] - res.M10[-1, k90]) / res.M10[-1, -1]
+
+    return SimpleNamespace(lag=lag, phi_boyle=phi_boyle, tau_relax=tau_relax, tau_decomp=tau_decomp,
+                           t_cell=t_cell, De=De, flux=flux, rel_change=rel_change,
+                           t_transit=np.sum(t_cell), phi_in=phi_in)
+
+
+def _print_diagnostics(res, grid):
+    d = res.diag
+    N = res.z.size
+    print('\n=== Diagnostica ===')
+    print(f'Tempo di transito totale: {d.t_transit:.3g} s   (tout = {res.t[-1]:.3g} s)')
+    print(f'Variazione relativa di M10 (cella alta) nell\'ultimo 10% del tempo: {d.rel_change:.2e}'
+          + ('   -> regime raggiunto' if d.rel_change < 1e-3 else '   -> NON a regime: aumenta tout'))
+    print(' cella   z[m]   p_l[kPa]  p_g-p_l[Pa]  phi      phi_Boyle  tau_rel[s]  tau_dec[s]  De      u(1-phi)/rif')
+    for i in range(N):
+        print(f' {i:3d}  {res.z[i]:7.1f} {res.pl[i]*1e-3:9.1f} {d.lag[i, -1]:11.1f}  {res.M10[i, -1]:.5f}  '
+              f'{d.phi_boyle[i]:.5f}   {d.tau_relax[i]:9.3g}  {d.tau_decomp[i]:9.3g}  {d.De[i]:.2e}  {d.flux[i, -1]:.4f}')
+
+
+def _make_diagnostic_figure(res):
+    d = res.diag
+    t, N = res.t, res.z.size
+    fig, axs = plt.subplots(1, 4, figsize=(18, 4.5))
+
+    for i in range(N):
+        axs[0].plot(t, d.lag[i] / res.pl[i] * 100, label=f'cella {i}')
+    axs[0].set_xlabel('Time [s]')
+    axs[0].set_ylabel('(p$_g$ - p$_l$) / p$_l$  [%]')
+    axs[0].set_title('Ritardo del gas')
+    axs[0].legend(loc='best')
+
+    axs[1].plot(res.z, res.M10[:, -1], 'o-', label='simulazione')
+    axs[1].plot(res.z, d.phi_boyle, 's--', label='Boyle (equilibrio)')
+    axs[1].set_xlabel('z [m]')
+    axs[1].set_ylabel('Gas volume fraction')
+    axs[1].set_title('Confronto con Boyle')
+    axs[1].legend(loc='best')
+
+    axs[2].semilogy(res.z, d.tau_relax, 'o-', label=r'$\tau$ rilassamento')
+    axs[2].semilogy(res.z, d.tau_decomp, 's-', label=r'$\tau$ decompressione')
+    axs[2].semilogy(res.z, d.t_cell, '^-', label='transito cella')
+    axs[2].set_xlabel('z [m]')
+    axs[2].set_ylabel('Tempo [s]')
+    axs[2].set_title('Scale di tempo')
+    axs[2].legend(loc='best')
+
+    axs[3].plot(res.z, d.flux[:, -1], 'o-')
+    axs[3].axhline(1.0, color='k', lw=0.8, ls='--')
+    axs[3].set_xlabel('z [m]')
+    axs[3].set_ylabel('u(1 - M$_{10}$) / valore di ingresso')
+    axs[3].set_title('Conservazione (deve valere 1)')
+
+    fig.tight_layout()
+    return fig
