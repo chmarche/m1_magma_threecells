@@ -66,10 +66,28 @@ def get_properties(model_surface_tension, model_diffusivity):
     def sigma(T, yl, ytot, funH, Models):
         return Models.surfaceTension.sigma
 
-    def D(yl, p, T, Is, Models):
+    def D_constant(yl, p, T, Is, Models):
         return np.atleast_1d(Models.diffusivity.D)[Is]
 
-    return SimpleNamespace(sigma=sigma, D=[D for _ in model_diffusivity])
+    def D_nowak_behrens(yl, p, T, Is, Models):
+        """Diffusivita' dell'acqua in fusi granitici (Nowak e Behrens, 1997; Eq. 6 del paper).
+        Calibrata per 1073-1473 K, 50-500 MPa, 0.5-6 wt% di H2O.   Ritorna D in m^2/s."""
+        Cw = 100.0 * np.atleast_1d(yl)[Is]      # contenuto d'acqua [wt%]
+        P = p / 1e8                              # pressione [kbar]
+        logD = (-4.81 - 0.045 * Cw + 0.027 * Cw ** 2) \
+               - (3378 - 483 * Cw + 46.9 * Cw ** 2 + 47.5 * P) / T     # log10(D [cm^2/s])
+        return 10.0 ** logD * 1e-4               # cm^2/s -> m^2/s
+
+    funs = []
+    for name in model_diffusivity:
+        if name == 'constant':
+            funs.append(D_constant)
+        elif name == 'NowakBehrens':
+            funs.append(D_nowak_behrens)
+        else:
+            raise ValueError(f"Modello di diffusivita' '{name}' non implementato")
+
+    return SimpleNamespace(sigma=sigma, D=funs)
 
 
 # Crescita di massa
@@ -77,7 +95,7 @@ def get_mass_growth(model_mass_growth):
     if model_mass_growth == 'zero':
         def Psi(v, m, yl, yg, ytot, p, T, Is, magma, funH, Models):
             return 0.0
- 
+
     elif model_mass_growth == 'diffusion':
         # Flusso di Fick verso una bolla isolata con profilo di concentrazione rilassato
         # (Eq. 17 del paper):   Psi = 4 pi R rho_l D (y_l - y_i)   [kg/s per bolla]
@@ -85,16 +103,16 @@ def get_mass_growth(model_mass_growth):
         #   y_i = solubilita' all'interfaccia, in equilibrio con il gas della bolla (pressione p_g)
         def Psi(v, m, yl, yg, ytot, p, T, Is, magma, funH, Models):
             beta = Constants.beta
-            R = (v / beta) ** (1 / 3)
+            R = (v * beta) ** (1 / 3)        # beta = 3/(4 pi): R = (3 v / 4 pi)^(1/3)
             Rs = Constants.R * np.sum(np.atleast_1d(yg) / np.atleast_1d(magma.species.PM))
             p_g = m * Rs * T / v                                      # pressione del gas nella bolla
             y_i = funH.thermoPT.yl(p_g, T, ytot, Models.saturation)   # solubilita' alla p_g
-            D = funH.properties.D[Is](yl, p_g, T, Is, Models)
+            D = funH.properties.D[Is](yl, p, T, Is, Models)      # p = pressione del liquido
             return 4 * np.pi * R * magma.liquid.rho_l * D * (np.atleast_1d(yl)[Is] - y_i)
- 
+
     else:
         raise ValueError(f"Modello di crescita di massa '{model_mass_growth}' non implementato")
- 
+
     return SimpleNamespace(Psi=Psi)
 
 
