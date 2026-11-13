@@ -151,8 +151,9 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
     p_g = M01 / M10 * Rs * T
     R_mean = (3 / 4 / np.pi * M10 / M00) ** (1 / 3)
 
+    c_diss = Yfis[:, num, :]                           # massa di H2O disciolta per m3 di miscela [kg/m3]
     res = SimpleNamespace(t=t, z=z, z_face=z_face, pl=pl, Y=Yfis, M00=M00, M10=M10, M01=M01,
-                          p_g=p_g, R_mean=R_mean, u_face=u_faces, sol=sol)
+                          c=c_diss, p_g=p_g, R_mean=R_mean, u_face=u_faces, sol=sol)
 
     if var_u:
         # Controllo di conservazione: a regime u*(1-alpha) (flusso volumetrico di liquido) costante
@@ -165,6 +166,12 @@ def magma_conduit(time, grid, cqmom, initial, magma, Models, save_out_figure=Fal
 
     figs = _make_figures(res)
     figs.append(_make_diagnostic_figure(res))
+
+    mass_on = (Models.massGrowth.name != 'zero')
+    if mass_on:
+        res.mass = _mass_diagnostics(res, grid, magma, rho_l, funH, Models)
+        _print_mass_diagnostics(res)
+        figs.append(_make_mass_figure(res))
     if save_out_figure:
         tag = 'Conduit' if not var_u else 'ConduitU'
         for i, fig in enumerate(figs, start=1):
@@ -299,6 +306,82 @@ def _make_diagnostic_figure(res):
     axs[3].set_xlabel('z [m]')
     axs[3].set_ylabel('u(1 - M$_{10}$) / valore di ingresso')
     axs[3].set_title('Conservazione (deve valere 1)')
+
+    fig.tight_layout()
+    return fig
+
+
+def _mass_diagnostics(res, grid, magma, rho_l, funH, Models):
+    """Diagnostica del trasferimento di massa (specie singola, H2O): sovrasaturazione, flussi conservati,
+    tempo di trasferimento di massa."""
+    N = res.z.size
+    T = funH.thermoPT.T(0.0, Models.temperature)
+    u_c = 0.5 * (res.u_face[:-1, :] + res.u_face[1:, :])
+    u_b = res.u_face[0, :]
+
+    # Frazione in massa di H2O disciolta e solubilita' alla pressione del liquido
+    yl = res.c / (rho_l * (1 - res.M10))
+    y_eq = funH.thermoPT.yl(res.pl, T, None, Models.saturation)        # (N,)
+    d_y = yl - y_eq[:, None]                                           # > 0: sovrasaturo
+
+    # Invarianti a regime, normalizzati al valore di ingresso (devono valere 1):
+    #   - flusso di acqua totale (disciolta + gas):      u (c + M01)
+    #   - flusso di fuso senza volatili (secco):         u (rho_l (1-phi) - c)
+    J_w = u_c * (res.c + res.M01)
+    J_w = J_w / (u_b[0] * (res.c[0, 0] + res.M01[0, 0]))
+    J_d = u_c * (rho_l * (1 - res.M10) - res.c)
+    J_d = J_d / (u_b[0] * (rho_l * (1 - res.M10[0, 0]) - res.c[0, 0]))
+
+    # Tempo di trasferimento di massa: tempo per raddoppiare la massa di gas di una bolla
+    tau_mass = np.empty(N)
+    for i in range(N):
+        v = res.M10[i, -1] / res.M00[i, -1]
+        m = res.M01[i, -1] / res.M00[i, -1]
+        psi = funH.massGrowth.Psi(v, m, np.array([yl[i, -1]]), np.array([1.0]), None,
+                                  res.pl[i], T, 0, magma, funH, Models)
+        tau_mass[i] = m / abs(psi) if psi != 0 else np.inf
+    return SimpleNamespace(yl=yl, y_eq=y_eq, d_y=d_y, J_w=J_w, J_d=J_d, tau_mass=tau_mass)
+
+
+def _print_mass_diagnostics(res):
+    d, ms = res.diag, res.mass
+    print('\n=== Diagnostica trasferimento di massa (H2O) ===')
+    print(' cella   z[m]   yl[-]     y_eq(p_l)  yl-y_eq    tau_mass[s]  t_cella[s]  J_acqua/rif  J_secco/rif')
+    for i in range(res.z.size):
+        print(f' {i:3d}  {res.z[i]:7.1f}  {ms.yl[i, -1]:.5f}  {ms.y_eq[i]:.5f}   {ms.d_y[i, -1]:+.5f}   '
+              f'{ms.tau_mass[i]:10.3g}  {d.t_cell[i]:10.3g}   {ms.J_w[i, -1]:.4f}      {ms.J_d[i, -1]:.4f}')
+
+
+def _make_mass_figure(res):
+    ms = res.mass
+    t, N = res.t, res.z.size
+    fig, axs = plt.subplots(1, 4, figsize=(18, 4.5))
+
+    axs[0].plot(res.z, ms.yl[:, -1], 'o-', label='disciolta (y$_l$)')
+    axs[0].plot(res.z, ms.y_eq, 's--', label='solubilita\' alla p$_l$')
+    axs[0].set_xlabel('z [m]')
+    axs[0].set_ylabel('Mass fraction of H$_2$O in the melt')
+    axs[0].legend(loc='best')
+
+    for i in range(N):
+        axs[1].plot(t, ms.d_y[i], label=f'cella {i}')
+    axs[1].set_xlabel('Time [s]')
+    axs[1].set_ylabel('y$_l$ - y$_{eq}$(p$_l$)  (>0: supersaturated)')
+    axs[1].legend(loc='best')
+
+    for i in range(N):
+        axs[2].plot(t, res.M01[i], label=f'cella {i}')
+    axs[2].set_xlabel('Time [s]')
+    axs[2].set_ylabel('M$_{01}$: gas mass per m$^3$ [kg/m$^3$]')
+    axs[2].legend(loc='best')
+
+    axs[3].plot(res.z, ms.J_w[:, -1], 'o-', label='flusso di acqua')
+    axs[3].plot(res.z, ms.J_d[:, -1], 's-', label='flusso di fuso secco')
+    axs[3].axhline(1.0, color='k', lw=0.8, ls='--')
+    axs[3].set_xlabel('z [m]')
+    axs[3].set_ylabel('flusso / valore di ingresso')
+    axs[3].set_title('Conservazione (devono valere 1)')
+    axs[3].legend(loc='best')
 
     fig.tight_layout()
     return fig
