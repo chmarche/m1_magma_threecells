@@ -74,12 +74,27 @@ def get_properties(model_surface_tension, model_diffusivity):
 
 # Crescita di massa
 def get_mass_growth(model_mass_growth):
-    if model_mass_growth != 'zero':
+    if model_mass_growth == 'zero':
+        def Psi(v, m, yl, yg, ytot, p, T, Is, magma, funH, Models):
+            return 0.0
+ 
+    elif model_mass_growth == 'diffusion':
+        # Flusso di Fick verso una bolla isolata con profilo di concentrazione rilassato
+        # (Eq. 17 del paper):   Psi = 4 pi R rho_l D (y_l - y_i)   [kg/s per bolla]
+        #   y_l = frazione in massa della specie disciolta nel fuso (media)
+        #   y_i = solubilita' all'interfaccia, in equilibrio con il gas della bolla (pressione p_g)
+        def Psi(v, m, yl, yg, ytot, p, T, Is, magma, funH, Models):
+            beta = Constants.beta
+            R = (v / beta) ** (1 / 3)
+            Rs = Constants.R * np.sum(np.atleast_1d(yg) / np.atleast_1d(magma.species.PM))
+            p_g = m * Rs * T / v                                      # pressione del gas nella bolla
+            y_i = funH.thermoPT.yl(p_g, T, ytot, Models.saturation)   # solubilita' alla p_g
+            D = funH.properties.D[Is](yl, p_g, T, Is, Models)
+            return 4 * np.pi * R * magma.liquid.rho_l * D * (np.atleast_1d(yl)[Is] - y_i)
+ 
+    else:
         raise ValueError(f"Modello di crescita di massa '{model_mass_growth}' non implementato")
-
-    def Psi(v, m, yl, yg, ytot, p, T, Is, magma, funH, Models):
-        return 0.0
-
+ 
     return SimpleNamespace(Psi=Psi)
 
 
