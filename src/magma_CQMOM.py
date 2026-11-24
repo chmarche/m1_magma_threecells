@@ -23,11 +23,11 @@ _ODE_SOLVERS = {
 def magma_cqmom(time, cqmom, initial, magma, Models, save_out_figure=False, show=True):
     
     Ns = len(magma.species.name)
-    if Ns != 1:
-        raise NotImplementedError('Implementata una sola specie volatile (H2O).')
-    if (cqmom.N1, cqmom.N2) != (1, 1):
-        raise NotImplementedError('Implementato solo il caso monodisperso (N1 = N2 = 1).')
-
+    if Ns < 1:
+        raise ValueError('Serve almeno una specie volatile.')
+    if (cqmom.N1, cqmom.N2) not in ((1, 1), (2, 1)):
+        raise NotImplementedError('Implementati solo (N1, N2) = (1, 1) e (2, 1).')
+      
     # Get functions
     funH = SimpleNamespace(
         initMethod=models.get_init_method(initial.method),
@@ -49,9 +49,12 @@ def magma_cqmom(time, cqmom, initial, magma, Models, save_out_figure=False, show
     PM = np.atleast_1d(magma.species.PM)
 
     y0 = funH.initMethod(f, initial, magma, funH, Models)
-    yl_rho_alpha0 = initial.yl * rho_l * (1 - y0[i_M10])     # massa disciolta / volume totale
-    Ytot0 = np.concatenate([y0, [yl_rho_alpha0]])
-
+    yl_in = np.atleast_1d(initial.yl)                          # Ns frazioni disciolte iniziali
+    yg_in = np.atleast_1d(initial.yg)                          # Ns frazioni nel gas iniziale (somma 1)
+    c0 = yl_in * rho_l * (1 - y0[i_M10])                       # massa disciolta / volume totale (Ns)
+    cg0 = yg_in[:Ns - 1] * y0[i_M01]                           # gas delle prime Ns-1 specie / volume totale
+    Ytot0 = np.concatenate([y0, c0, cg0])
+  
     class Norm:
         pass
 
@@ -59,9 +62,13 @@ def magma_cqmom(time, cqmom, initial, magma, Models, save_out_figure=False, show
     norm.w_0 = y0[0]
     norm.v_0 = y0[i_M10] / y0[0]
     norm.m_0 = y0[i_M01] / y0[0]
-    norm.yl = initial.yl
-    norm.yg = initial.yg
-
+    if Ns == 1:
+        norm.yl = initial.yl                                   # scala storica (una specie)
+        norm.yg = initial.yg
+    else:
+        norm.yl = np.where(c0 > 0, c0, 1.0)                    # valori iniziali -> variabili O(1)
+        norm.yg = np.where(cg0 > 0, cg0, y0[i_M01])            # fallback se una specie parte da zero
+      
     # aggiungo f e norm agli oggetti passati
     cqmom.f = f
     initial.norm = norm
@@ -88,19 +95,28 @@ def magma_cqmom(time, cqmom, initial, magma, Models, save_out_figure=False, show
     t = sol.t
     Ytot = np.array([renormalize(sol.y[:, i], f, Ns, norm) for i in range(t.size)])
     Y = Ytot[:, :num]
-    c = Ytot[:, num]                                         # massa disciolta / volume totale
-
     M00, M10, M01 = Y[:, 0], Y[:, i_M10], Y[:, i_M01]
-    yl = c / rho_l / (1 - M10)                               # frazione in massa disciolta
-    yg = np.ones(t.size)                                     # una sola specie: yg = 1
+    cs = Ytot[:, num:num + Ns]                               # (nt, Ns) massa disciolta / volume totale
+    cg = np.empty_like(cs)                                   # (nt, Ns) massa di gas / volume totale
+    cg[:, :Ns - 1] = Ytot[:, num + Ns:num + 2 * Ns - 1]
+    cg[:, Ns - 1] = M01 - cg[:, :Ns - 1].sum(axis=1)         # ultima specie = complemento
+    yls = cs / rho_l / (1 - M10)[:, None]                    # frazioni in massa disciolte
+    ygs = cg / M01[:, None]                                  # composizione del gas
     rho_mix = M01 + (1 - M10) * rho_l
-    ytot = (c + yg * M01) / rho_mix                          # frazione in massa totale di volatili
-    Rs = Constants.R * (yg / PM[0])
+    ytots = (cs + cg) / rho_mix[:, None]                     # frazioni in massa totali dei volatili
+    Rs = Constants.R * np.sum(ygs / PM[None, :], axis=1)
     T = funH.thermoPT.T(t, Models.temperature)
     p_l = funH.thermoPT.p(t, Models.pressure)
     p_g = M01 / M10 * Rs * T                                 # pressione media del gas
 
-    res = SimpleNamespace(t=t, Y=Y, f=f, yl=yl, yg=yg, ytot=ytot, p_g=p_g, p_l=p_l, T=T,
+    if Ns == 1:                                              # forme 1D storiche
+        yl, yg, ytot = yls[:, 0], ygs[:, 0], ytots[:, 0]
+    else:
+        yl, yg, ytot = yls, ygs, ytots
+      
+    res = SimpleNamespace(t=t, Y=Y, f=f, N1=cqmom.N1, N2=cqmom.N2, Ns=Ns,
+                          yl=yl, yg=yg, ytot=ytot, yls=yls, ygs=ygs, ytots=ytots,
+                          cs=cs, cg=cg, p_g=p_g, p_l=p_l, T=T,
                           rho_mix=rho_mix, cpu_time=tcf, sol=sol)
 
     # Grafici
